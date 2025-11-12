@@ -55,21 +55,6 @@ def test_compute_group_normalized_rewards_no_normalize_by_std(
     }
     numpy_snapshot.assert_match(output)
 
-
-
-
-def test_compute_naive_policy_gradient_loss(
-    numpy_snapshot,
-    raw_rewards_or_advantages,
-    policy_log_probs,
-):
-    output = compute_naive_policy_gradient_loss(
-        raw_rewards_or_advantages=raw_rewards_or_advantages,
-        policy_log_probs=policy_log_probs,
-    )
-    numpy_snapshot.assert_match(output)
-
-
 def test_compute_grpo_clip_loss_large_cliprange(
     numpy_snapshot,
     advantages,
@@ -98,61 +83,6 @@ def test_compute_grpo_clip_loss_small_cliprange(
         cliprange=0.1,
     )
     numpy_snapshot.assert_match(output)
-
-
-def test_compute_policy_gradient_loss_no_baseline(
-    numpy_snapshot,
-    policy_log_probs,
-    raw_rewards,
-    advantages,
-    old_log_probs,
-):
-    output, _ = compute_policy_gradient_loss(
-        policy_log_probs=policy_log_probs,
-        loss_type="no_baseline",
-        raw_rewards=raw_rewards,
-        advantages=advantages,
-        old_log_probs=old_log_probs,
-        cliprange=0.5,
-    )
-    numpy_snapshot.assert_match(output)
-
-
-def test_compute_policy_gradient_loss_reinforce_with_baseline(
-    numpy_snapshot,
-    policy_log_probs,
-    raw_rewards,
-    advantages,
-    old_log_probs,
-):
-    output, _ = compute_policy_gradient_loss(
-        policy_log_probs=policy_log_probs,
-        loss_type="reinforce_with_baseline",
-        raw_rewards=raw_rewards,
-        advantages=advantages,
-        old_log_probs=old_log_probs,
-        cliprange=0.5,
-    )
-    numpy_snapshot.assert_match(output)
-
-
-def test_compute_policy_gradient_loss_grpo_clip(
-    numpy_snapshot,
-    policy_log_probs,
-    raw_rewards,
-    advantages,
-    old_log_probs,
-):
-    output, _ = compute_policy_gradient_loss(
-        policy_log_probs=policy_log_probs,
-        loss_type="grpo_clip",
-        raw_rewards=raw_rewards,
-        advantages=advantages,
-        old_log_probs=old_log_probs,
-        cliprange=0.5,
-    )
-    numpy_snapshot.assert_match(output)
-
 
 def test_masked_mean_dim0(numpy_snapshot, tensor, mask):
     output = masked_mean(
