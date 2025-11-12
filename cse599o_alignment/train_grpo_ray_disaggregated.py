@@ -48,10 +48,10 @@ class TrajectoryQueue:
     def __init__(self):
         self.q = asyncio.Queue()
 
-    async def put(self, traj: Trajectory):
+    def put(self, traj: Trajectory):
         await self.q.put(traj)
 
-    async def get(self):
+    def get(self):
         try:
             return await asyncio.wait_for(self.q.get(), timeout=0.5)
         except asyncio.TimeoutError:
@@ -64,11 +64,11 @@ class ReplayBuffer:
     def __init__(self):
         self.data = []
 
-    async def put(self, traj: Trajectory):
+    def put(self, traj: Trajectory):
         # TODO: store completed trajectories here
         pass
 
-    async def sample(self, k: int):
+    def sample(self, k: int):
         # TODO: sample k trajectories for training
         return []
 
@@ -81,7 +81,7 @@ class Scorer:
         self.replay_buf = replay_buf
         self.running = False
 
-    async def run(self):
+    def run(self):
         """Continuously fetch trajectories, assign rewards, and store them."""
         self.running = True
         while self.running:
@@ -91,7 +91,7 @@ class Scorer:
             # TODO: compute rewards for traj.actions
             await self.replay_buf.put.remote(traj)
 
-    async def stop(self):
+    def stop(self):
         self.running = False
 
 
@@ -109,17 +109,17 @@ class Learner:
         self.version = 0
         self.replay_buf = replay_buf
 
-    async def step(self):
+    def step(self):
         """One GRPO/PPO-style update step."""
         # TODO: sample from replay buffer, compute advantages, update model
         loss = torch.tensor(0.0)
         self.version += 1
         return float(loss.item())
 
-    async def get_weights(self):
+    def get_weights(self):
         return {k: v.cpu() for k, v in self.model.state_dict().items()}
 
-    async def get_version(self):
+    def get_version(self):
         return self.version
 
 
@@ -136,12 +136,12 @@ class Generator:
         self.traj_q = traj_q
         self.version = 0
 
-    async def generate(self, state: torch.Tensor):
+    def generate(self, state: torch.Tensor):
         """Generate actions and send to Scorer."""
         # TODO: sample actions and log-probs
         pass
 
-    async def update(self, weights, version: int):
+    def update(self, weights, version: int):
         """Load updated learner weights."""
         sd = self.model.state_dict()
         for n, w in weights.items():

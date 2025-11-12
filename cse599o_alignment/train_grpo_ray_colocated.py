@@ -132,7 +132,7 @@ class ColocatedWorker(Generator, Learner):
         Learner.__init__(self)
         self.step_count = 0
     
-    async def training_step(self, prompts: List[str]) -> Dict[str, Any]:
+    def training_step(self, prompts: List[str]) -> Dict[str, Any]:
         """Perform one complete training step: generate rollout + update policy."""
         # Generate trajectories for the batch of prompts
         trajectories = self.generate_trajectories(prompts)
@@ -149,7 +149,7 @@ class ColocatedWorker(Generator, Learner):
             'avg_reward': float(torch.cat([traj.rewards for traj in trajectories]).mean()) if trajectories else 0.0
         }
     
-    async def get_statistics(self) -> Dict[str, Any]:
+    def get_statistics(self) -> Dict[str, Any]:
         """Get current training statistics."""
         return {
             'step_count': self.step_count,
@@ -159,46 +159,19 @@ class ColocatedWorker(Generator, Learner):
 
 # ===================== Training loop =====================
 
-async def run_training(num_steps: int = 10, num_workers: int = 1):
+def run_training(num_steps: int = 10, num_workers: int = 1):
     """Run colocated GRPO training with text generation."""
     
     # Create workers  
-    workers = [ColocatedWorker.remote() for _ in range(num_workers)]
     
     # TODO: Define training prompts
-    # training_prompts = ["Write a story about", "Explain the concept of", "Describe how to"]
-    
-    print(f"Starting GRPO training with {num_workers} colocated workers for {num_steps} steps...")
     
     for step in range(num_steps):
-        # TODO: Sample prompts for each worker
-        # For now, using placeholder prompts
-        prompt_batches = [["Sample prompt"] * G for _ in range(num_workers)]
+        # TODO: 
+        pass
         
-        # Run training step on all workers in parallel
-        futures = [
-            worker.training_step.remote(prompts) 
-            for worker, prompts in zip(workers, prompt_batches)
-        ]
-        
-        # Wait for all workers to complete
-        results = await asyncio.gather(*futures)
-        
-        # Print progress
-        avg_loss = np.mean([r['loss'] for r in results])
-        avg_reward = np.mean([r['avg_reward'] for r in results])
-        
-        print(f"Step {step + 1}/{num_steps}: "
-              f"Avg Loss = {avg_loss:.4f}, "
-              f"Avg Reward = {avg_reward:.4f}")
-    
     # Get final statistics
-    stats_futures = [worker.get_statistics.remote() for worker in workers]
-    final_stats = await asyncio.gather(*stats_futures)
-    
-    print("\nFinal Statistics:")
-    for i, stats in enumerate(final_stats):
-        print(f"Worker {i}: {stats}")
+    pass
 
 
 def run_once(num_steps: int = 10, num_workers: int = 1):
