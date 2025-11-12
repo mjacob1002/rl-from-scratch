@@ -1,5 +1,5 @@
 """
-GRPO Algorithm Implementation - Assignment 3 Problems 1-6
+GRPO Algorithm Implementation - Assignment 3
 ========================================================
 """
 
@@ -107,7 +107,7 @@ def grpo_microbatch_train_step(
         policy_log_probs: torch.Tensor,
         response_mask: torch.Tensor,
         gradient_accumulation_steps: int,
-        loss_type: Literal["grpo_clip"],
+        loss_type: Literal["grpo_clip"], # for this assignment, only "grpo_clip" is required
         raw_rewards: torch.Tensor | None=None,
         advantages: torch.Tensor | None=None,
         old_log_probs: torch.Tensor | None=None,
