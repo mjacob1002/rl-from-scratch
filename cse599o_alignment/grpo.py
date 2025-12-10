@@ -4,8 +4,9 @@ GRPO Algorithm Implementation - Assignment 3
 """
 
 import torch
-from einops import repeat
+from einops import repeat, rearrange
 from typing import Literal
+
 
 
 def compute_group_normalized_reward(
@@ -47,7 +48,22 @@ def compute_group_normalized_reward(
         
         metadata: your choice of other statistics to log (e.g. mean, std, max/min of rewards).
     """
-    pass
+    list_of_reward_dicts, list_of_rewards = [], []
+    for i, rollout_response in enumerate(rollout_responses):
+        reward_dict = reward_fn(rollout_response, repeated_ground_truths[i])
+        list_of_reward_dicts.append(reward_dict)
+        list_of_rewards.append(reward_dict['reward'])
+    list_of_rewards = torch.tensor(list_of_rewards)
+    raw_rewards = list_of_rewards[:]
+    list_of_rewards = rearrange(list_of_rewards, "(g s) -> g s", s=group_size)
+    print(f"raw_rewards.shape={raw_rewards.shape}, list_of_rewards.shape={list_of_rewards.shape}")
+    mean_of_rewards = list_of_rewards.mean(dim=-1, keepdim=True)
+    advantages = (list_of_rewards - mean_of_rewards)
+    print(f"advantages.shape={advantages.shape}")
+    if normalized_by_std:
+        normalized_advantages = advantages / (list_of_rewards.std(dim=-1, keepdim=True) + advantage_eps)
+        return (normalized_advantages.view(-1), raw_rewards, {})
+    return (advantages.view(-1), raw_rewards, {})
 
 def compute_grpo_clip_loss(
     advantages: torch.Tensor,
@@ -79,7 +95,10 @@ def compute_grpo_clip_loss(
         token was clipped or not, i.e., whether the clipped policy gradient loss on the RHS of
         the min was lower than the LHS.
     """
-    pass
+    new_probs_ratio = torch.exp(policy_log_probs - old_log_probs)
+    first_product = new_probs_ratio * advantages
+    clipped = torch.clamp(new_probs_ratio, 1 - cliprange, 1+cliprange) * advantages
+    return (-1 * torch.min(first_product, clipped), {})
 
 def masked_mean(
     tensor: torch.Tensor,
@@ -100,6 +119,10 @@ def masked_mean(
     Returns:
         torch.Tensor The masked mean; shape matches tensor.mean(dim) semantics.
     """
+    masked_out_values = torch.masked_fill(tensor, ~mask, 0) # 0 out values that we don't care about
+    total_sum = torch.sum(masked_out_values, dim=dim)
+    total_num_elems = torch.sum(mask, dim=dim)
+    return total_sum / total_num_elems
     pass
 
 
@@ -144,5 +167,10 @@ def grpo_microbatch_train_step(
         metadata Dict with metadata from the underlying loss call, and any other statistics you
         might want to log.
     """
-    pass
+    grpo_clip_loss , _= compute_grpo_clip_loss(advantages, policy_log_probs, old_log_probs, cliprange)
+    masked_grpo_clip_loss = masked_mean(grpo_clip_loss, response_mask, dim=-1) # with (batch_size, ) values
+    microbatch_loss = torch.mean(masked_grpo_clip_loss) / gradient_accumulation_steps
+    microbatch_loss.backward()
+    return microbatch_loss, {}
+
 
