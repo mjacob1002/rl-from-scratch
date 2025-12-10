@@ -77,6 +77,7 @@ def get_keyword(prompt: str) -> str:
     import re
     match = re.search(r"the word '(\w+)'", prompt)
     if match:
+        print(f"got keyword {match.group(1)}")
         return match.group(1)
     return ""
 
@@ -268,6 +269,7 @@ class Generator:
         for response_tokens in responses_list:
             # Decode the full sequence (prompt + response) to text
             response_str = self.gen_tokenizer.decode(response_tokens)
+            print(response_str)
             # Remove the prompt prefix to get just the generated response
             response_str = response_str[len(prompt):]
             
@@ -443,7 +445,7 @@ class Learner:
 # ===================== Combined Actor =====================
 
 @ray.remote(num_gpus=1)
-class ColocatedWorker:
+class ColocatedWorker(Learner, Generator):
     """
     Combined Generator and Learner in a single Ray actor.
     
@@ -458,158 +460,38 @@ class ColocatedWorker:
     The training loop is synchronous:
     1. Generate rollouts with current policy
     2. Compute advantages and update policy
-    3. Repeat
+    3. Repeat (no weight sync needed since they share the same model)
     """
     
     def __init__(self):
-        # Device setup
-        self.device = get_device()
+        # Initialize Learner first (creates learner_model and optimizer)
+        Learner.__init__(self)
         
-        # Single shared model for both generation and learning
-        # This is the policy we're optimizing
-        self.model = MyTransformerLM(
-            vocab_size=VOCAB_SIZE, 
-            d_model=D_MODEL, 
-            num_heads=NUM_HEADS, 
-            num_layers=NUM_LAYERS, 
-            d_ff=D_FF, 
-            theta=THETA, 
-            max_seq_len=CONTEXT_LENGTH, 
-            device=self.device
-        )
+        # Initialize Generator (creates gen_model and gen_tokenizer)
+        # Note: This creates a SEPARATE model from learner_model
+        Generator.__init__(self)
         
-        # Load pretrained weights if checkpoint path is provided
-        if CHECKPOINT_PATH:
-            checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
-            self.model.load_state_dict(checkpoint['model_state_dict'])
-        
-        # Tokenizer for encoding/decoding text
-        self.tokenizer = tiktoken.get_encoding("gpt2")
-        
-        # Optimizer for policy updates
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=LEARNING_RATE)
+        # Sync generator weights to match learner weights at initialization
+        self._sync_weights()
         
         # Training step counter
         self.step_count = 0
-
-    def generate_trajectories(self, prompts: List[str]) -> List[Trajectory]:
+        
+        print(f"ColocatedWorker initialized on device: {self.learner_device}")
+    
+    def _sync_weights(self):
         """
-        Generate G responses for each prompt.
+        Synchronize weights from learner_model to gen_model.
         
-        Uses the shared self.model in eval mode for generation.
+        In the colocated setup, we maintain separate model instances but need to
+        keep them in sync. After each training update, we copy the learner's
+        weights to the generator so it uses the updated policy for rollouts.
+        
+        This manual sync approach lets us measure the weight synchronization overhead,
+        which becomes important when comparing to disaggregated setups.
         """
-        global G
-        trajectories = []
-        
-        # Put model in eval mode for generation (no dropout, etc.)
-        self.model.eval()
-        
-        with torch.no_grad():
-            for prompt in prompts:
-                # Tokenize and batch the prompt
-                tokenized_prompt = self.tokenizer.encode(prompt)
-                batched_tokenized_prompt = [tokenized_prompt] * G
-                batched_tokenized_prompt_tensor = torch.tensor(
-                    batched_tokenized_prompt, 
-                    device=self.device
-                )
-                
-                list_of_log_probs_per_token = []
-                
-                # Autoregressive generation
-                for i in range(SAMPLING_MAX_TOKENS):
-                    logits = self.model(batched_tokenized_prompt_tensor)
-                    scaled_logits = logits[:, -1, :] / SAMPLING_TEMPERATURE
-                    distribution = Categorical(logits=scaled_logits)
-                    outputted_tensor = distribution.sample()
-                    batched_tokenized_prompt_tensor = torch.cat(
-                        [batched_tokenized_prompt_tensor, outputted_tensor.unsqueeze(-1)], 
-                        dim=1
-                    )
-                    log_prob = distribution.log_prob(outputted_tensor)
-                    list_of_log_probs_per_token.append(log_prob)
-                
-                log_probs_stacked = torch.stack(list_of_log_probs_per_token, dim=-1)
-                response_masks = torch.ones(G, SAMPLING_MAX_TOKENS, dtype=torch.bool, device=self.device)
-                
-                # Compute rewards
-                keyword = get_keyword(prompt)
-                reward_tensor = self._reward_for_trajectory(prompt, batched_tokenized_prompt_tensor, keyword)
-                
-                trajectory = Trajectory(
-                    prompt=prompt,
-                    responses=batched_tokenized_prompt_tensor,
-                    rewards=reward_tensor,
-                    log_probs=log_probs_stacked,
-                    response_masks=response_masks
-                )
-                trajectories.append(trajectory)
-        
-        return trajectories
-
-    def _reward_for_trajectory(self, prompt: str, responses: torch.Tensor, keyword: str) -> torch.Tensor:
-        """Compute keyword-inclusion reward for each response."""
-        responses_list = responses.tolist()
-        rewards = []
-        for response_tokens in responses_list:
-            response_str = self.tokenizer.decode(response_tokens)
-            response_str = response_str[len(prompt):]
-            if keyword in response_str:
-                rewards.append(1.0)
-            else:
-                rewards.append(0.0)
-        return torch.tensor(rewards, device=self.device)
-
-    def compute_advantages(self, trajectories: List[Trajectory]) -> torch.Tensor:
-        """
-        Compute group-relative advantages for GRPO.
-        
-        Advantage = (reward - group_mean) / group_std
-        """
-        group_rewards = torch.stack([traj.rewards for traj in trajectories])
-        group_means = group_rewards.mean(dim=1, keepdim=True)
-        shifted_rewards = group_rewards - group_means
-        
-        if USE_STD_NORMALIZATION:
-            group_stds = group_rewards.std(dim=1, keepdim=True)
-            advantages = shifted_rewards / (group_stds + ADVANTAGE_EPS)
-        else:
-            advantages = shifted_rewards
-            
-        return advantages
-
-    def update_policy(self, trajectories: List[Trajectory]) -> float:
-        """Perform GRPO policy update."""
-        self.model.train()
-        self.optimizer.zero_grad()
-        
-        advantages = self.compute_advantages(trajectories)
-        total_loss = 0.0
-        
-        for traj_idx, trajectory in enumerate(trajectories):
-            logits = self.model(trajectory.responses)
-            non_prompt_tokens_logits = logits[:, -SAMPLING_MAX_TOKENS - 1:-1, :]
-            vocab_log_probs = torch.log_softmax(non_prompt_tokens_logits, dim=-1)
-            generated_tokens_tensor = trajectory.responses[:, -SAMPLING_MAX_TOKENS:].unsqueeze(-1)
-            policy_log_probs = torch.gather(vocab_log_probs, dim=2, index=generated_tokens_tensor).squeeze(-1)
-            
-            traj_advantages = advantages[traj_idx].unsqueeze(-1)
-            
-            loss, _ = grpo_microbatch_train_step(
-                policy_log_probs=policy_log_probs,
-                response_mask=trajectory.response_masks,
-                gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS * len(trajectories),
-                loss_type=LOSS_TYPE,
-                advantages=traj_advantages,
-                old_log_probs=trajectory.log_probs,
-                cliprange=CLIP_RANGE
-            )
-            total_loss += loss.item()
-        
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.optimizer.step()
-        
-        return total_loss
+        # Copy state dict from learner to generator
+        self.gen_model.load_state_dict(self.learner_model.state_dict())
     
     def training_step(self, prompts: List[str]) -> Dict[str, Any]:
         """
@@ -625,18 +507,22 @@ class ColocatedWorker:
             Dictionary with training statistics including timing info
         """
         # Phase 1: Generate rollouts (G responses per prompt)
+        # Uses Generator.generate_trajectories() with self.gen_model
         rollout_start = time.time()
         trajectories = self.generate_trajectories(prompts)
         rollout_time = time.time() - rollout_start
         
         # Phase 2: Update policy using GRPO
+        # Uses Learner.update_policy() with self.learner_model
         train_start = time.time()
         loss = self.update_policy(trajectories)
         train_time = time.time() - train_start
         
-        # Weight sync time: In colocated setup, generator and learner share the same model,
-        # so there's no weight synchronization needed (it's effectively 0)
-        weight_sync_time = 0.0
+        # Phase 3: Sync updated weights from learner_model to gen_model
+        # This ensures the generator uses the updated policy for the next rollout
+        sync_start = time.time()
+        self._sync_weights()
+        weight_sync_time = time.time() - sync_start
         
         self.step_count += 1
         
@@ -659,7 +545,7 @@ class ColocatedWorker:
         """Get current training statistics."""
         return {
             'step_count': self.step_count,
-            'model_parameters': sum(p.numel() for p in self.model.parameters())
+            'model_parameters': sum(p.numel() for p in self.learner_model.parameters())
         }
 
 

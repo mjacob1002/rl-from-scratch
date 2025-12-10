@@ -123,7 +123,6 @@ def masked_mean(
     total_sum = torch.sum(masked_out_values, dim=dim)
     total_num_elems = torch.sum(mask, dim=dim)
     return total_sum / total_num_elems
-    pass
 
 
 def grpo_microbatch_train_step(
