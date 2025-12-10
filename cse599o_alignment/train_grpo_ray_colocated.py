@@ -21,12 +21,14 @@ import tiktoken
 import time
 from typing import List, Dict, Any, Optional
 import numpy as np
+import copy
 
 from cse599o_basics.transformer import MyTransformerLM
 from cse599o_basics.adamw import AdamW
 from cse599o_alignment.grpo import (
     compute_group_normalized_reward,
     grpo_microbatch_train_step,
+    masked_mean
 )
 from cse599o_alignment.gradient_clipping import gradient_clipping
 
@@ -53,6 +55,14 @@ USE_STD_NORMALIZATION: bool = True
 CLIP_RANGE: float = 0.2  # PPO-style clipping parameter (epsilon)
 GRADIENT_ACCUMULATION_STEPS: int = 1
 
+def kl_divergence(
+    policy_log_probs: torch.Tensor,
+    reference_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+) -> torch.Tensor:
+    log_ratio = policy_log_probs - reference_log_probs
+    kl = masked_mean(log_ratio, response_mask, dim=None)
+    return kl
 
 def get_device():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -476,6 +486,8 @@ class ColocatedWorker(Learner, Generator):
         
         # Training step counter
         self.step_count = 0
+        # Initial model for KL-Divergence
+        self.init_model = copy.deepcopy(self.gen_model)
         
         print(f"ColocatedWorker initialized on device: {self.learner_device}")
     
@@ -509,6 +521,7 @@ class ColocatedWorker(Learner, Generator):
         # Phase 1: Generate rollouts (G responses per prompt)
         # Uses Generator.generate_trajectories() with self.gen_model
         rollout_start = time.time()
+        
         trajectories = self.generate_trajectories(prompts)
         rollout_time = time.time() - rollout_start
         
@@ -517,6 +530,9 @@ class ColocatedWorker(Learner, Generator):
         train_start = time.time()
         loss = self.update_policy(trajectories)
         train_time = time.time() - train_start
+
+        # before the weight sync, compute the KL divergence between the updated model weights and the pi_0, pi_i-1
+        
         
         # Phase 3: Sync updated weights from learner_model to gen_model
         # This ensures the generator uses the updated policy for the next rollout
