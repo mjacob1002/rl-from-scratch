@@ -30,8 +30,7 @@ from cse599o_alignment.train_grpo_ray_colocated import (
 from ray.experimental.collective import create_collective_group
 
 
-RDT = True
-
+RDT = True 
 
 # ===================== Replay Buffer =====================
 
@@ -90,7 +89,7 @@ class DisaggregatedGenerator(Generator):
             traj.log_probs = traj.log_probs.cpu()
             traj.rewards = traj.rewards.cpu()
             traj.response_masks = traj.response_masks.cpu()
-            ray.get(self.replay_buf.put.remote(traj))
+            self.replay_buf.put.remote(traj)
         
         return len(trajectories)
 
@@ -208,20 +207,20 @@ def run_training(num_steps: int = 10):
         else:
             weights = learner.get_weights.remote()
         version = learner.get_version.remote()
-        ray.get(generator.update_weights.remote(weights, version))
+        generator.update_weights.remote(weights, version)
         sync_time = time.time() - sync_start
         
         # Phase 4: Wait for next rollout to complete
+        #ray.get(next_rollout_future)
         ray.get(next_rollout_future)
         rollout_time = time.time() - rollout_start
         
         step_time = time.time() - step_start
-        buf_size = ray.get(replay_buf.size.remote())
+        #buf_size = ray.get(replay_buf.size.remote())
         
         print(f"Step {step + 1}/{num_steps}: "
               f"loss={train_result['loss']:.4f}, "
               f"version={train_result['version']}, "
-              f"buf_size={buf_size}, "
               f"time={step_time:.2f}s")
         print(f"  Timing: rollout={rollout_time:.2f}s, "
               f"train={train_time:.2f}s, "
@@ -233,7 +232,10 @@ def run_training(num_steps: int = 10):
 
 def run_once(num_steps: int = 10):
     """Entry point for training."""
+    start_time = time.time()
     run_training(num_steps)
+    end_time = time.time()
+    print(f"Disaggregated total time: {end_time - start_time}")
 
 
 # ===================== Entry point =====================

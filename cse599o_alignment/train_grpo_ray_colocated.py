@@ -72,18 +72,6 @@ def get_device():
 
 
 def get_keyword(prompt: str) -> str:
-    """
-    Extract the target keyword from a prompt for the keyword-inclusion reward.
-    
-    The prompts follow the format: "Write a sentence containing the word '<keyword>'."
-    This function parses out the keyword between the single quotes.
-    
-    Args:
-        prompt: The input prompt string
-        
-    Returns:
-        The extracted keyword, or empty string if not found
-    """
     # Look for pattern: the word '<keyword>'
     import re
     match = re.search(r"the word '(\w+)'", prompt)
@@ -97,9 +85,7 @@ def get_keyword(prompt: str) -> str:
 
 class Trajectory:
     """
-    Stores a single rollout trajectory for text generation.
-    
-    In GRPO, for each prompt we generate G responses. This class holds:
+    Stores a single rollout trajectory for text generation that are needed by GRPO
     - The original prompt
     - All G generated responses (full sequences including prompt tokens)
     - The rewards for each response
@@ -127,16 +113,7 @@ class Trajectory:
 # ===================== Base classes (no @ray.remote) =====================
 
 class Generator:
-    """
-    Base class for text generation using TransformerLM.
-    
-    The Generator is responsible for:
-    1. Taking prompts and generating G responses per prompt (rollouts)
-    2. Computing log probabilities for each generated token
-    3. Computing rewards for each response
-    
-    In GRPO, we generate multiple responses per prompt to compute group-relative advantages.
-    """
+    """Base class for text generation using TransformerLM. """
 
     def __init__(self):
         # Device setup - use GPU if available for faster generation
@@ -153,6 +130,7 @@ class Generator:
             max_seq_len=CONTEXT_LENGTH, 
             device=self.gen_device
         )
+
         
         # Load pretrained weights if checkpoint path is provided
         if CHECKPOINT_PATH:
@@ -165,25 +143,18 @@ class Generator:
     def generate_trajectories(self, prompts: List[str]) -> List[Trajectory]:
         """
         Generate G responses for each prompt using TransformerLM.
-        
-        This is the core rollout generation function. For each prompt:
-        1. Tokenize the prompt and replicate it G times (one for each response)
-        2. Autoregressively generate SAMPLING_MAX_TOKENS new tokens
-        3. Collect log probabilities for computing policy gradients later
-        4. Compute rewards for each generated response
-        
-        Args:
-            prompts: List of text prompts to generate responses for
-            
-        Returns:
-            List of Trajectory objects, one per prompt
+
+        TODO: Implement this method
+        - For each prompt, generate G responses using self.model
+        - Calculate log probabilities for generated tokens
+        - Return list of Trajectory objects with prompts, responses, log_probs
         """
         global G
         trajectories = []
         
         # Put model in eval mode for generation (disables dropout, etc.)
         self.gen_model.eval()
-        
+
         with torch.no_grad():  # No gradients needed during generation
             for prompt in prompts:
                 # Tokenize the prompt: convert text to list of token IDs
@@ -258,21 +229,7 @@ class Generator:
         return trajectories
 
     def reward_for_trajectory(self, prompt: str, responses: torch.Tensor, keyword: str) -> torch.Tensor:
-        """
-        Compute keyword-inclusion reward for each response.
-        
-        This is a simple binary reward function:
-        - Returns 1 if the response contains the target keyword
-        - Returns 0 otherwise
-        
-        Args:
-            prompt: The original prompt text
-            responses: Token IDs tensor of shape (G, prompt_length + max_sampling_tokens)
-            keyword: The target keyword that should appear in the response
-            
-        Returns:
-            Tensor of shape (G,) with reward for each response
-        """
+        """Compute keyword-inclusion reward for each response."""
         # Convert token IDs back to text
         responses_list = responses.tolist()
         rewards = []
@@ -294,17 +251,7 @@ class Generator:
 
 
 class Learner:
-    """
-    Base learner class for policy gradient updates using TransformerLM.
-    
-    The Learner is responsible for:
-    1. Computing group-relative advantages from rewards
-    2. Computing current policy log probabilities 
-    3. Performing GRPO policy gradient updates
-    
-    In GRPO, we use the group mean as a baseline (instead of a learned value function),
-    which simplifies training while still reducing variance.
-    """
+    """Base learner class for policy gradient updates using TransformerLM."""
     
     def __init__(self):
         # Device setup
@@ -333,21 +280,9 @@ class Learner:
 
     def compute_advantages(self, trajectories: List[Trajectory]) -> torch.Tensor:
         """
-        Compute group-relative advantages for GRPO.
-        
-        This is the key insight of GRPO: instead of using a learned value function
-        as baseline (like in PPO), we use the mean reward within each group.
-        
+        Compute group-relative advantages for GRPO.        
         Advantage_i = (reward_i - mean(group_rewards)) / std(group_rewards)
-        
-        This removes the need for a critic network while still providing
-        variance reduction through the group baseline.
-        
-        Args:
-            trajectories: List of Trajectory objects, each containing G responses
-            
-        Returns:
-            Tensor of shape (N, G) where N is number of prompts
+
         """
         # Stack rewards from all trajectories: each traj.rewards has shape (G,)
         # Result shape: (N, G) where N = number of prompts
@@ -381,12 +316,6 @@ class Learner:
         2. Forward pass to get current policy log probabilities
         3. Compute GRPO clipped loss (like PPO but with group advantages)
         4. Backpropagate and update weights
-        
-        Args:
-            trajectories: List of Trajectory objects from rollout generation
-            
-        Returns:
-            The loss value as a float
         """
         # Put model in training mode
         self.learner_model.train()
@@ -457,31 +386,16 @@ class Learner:
 
 @ray.remote(num_gpus=1)
 class ColocatedWorker(Learner, Generator):
-    """
-    Combined Generator and Learner in a single Ray actor.
-    
-    "Colocated" means the generation and learning happen in the same process/GPU.
-    This is simpler than disaggregated training where they run separately.
-    
-    Key design: We use a SINGLE model for both generation and learning.
-    This avoids:
-    - Memory overhead of two models
-    - Need to sync weights between generator and learner
-    
-    The training loop is synchronous:
-    1. Generate rollouts with current policy
-    2. Compute advantages and update policy
-    3. Repeat (no weight sync needed since they share the same model)
-    """
-    
+    """Combined Generator and Learner in a single Ray actor."""
+   # k is how off-policy to go 
     def __init__(self):
+
         # Initialize Learner first (creates learner_model and optimizer)
         Learner.__init__(self)
         
         # Initialize Generator (creates gen_model and gen_tokenizer)
         # Note: This creates a SEPARATE model from learner_model
         Generator.__init__(self)
-        
         # Sync generator weights to match learner weights at initialization
         self._sync_weights()
         
@@ -493,55 +407,33 @@ class ColocatedWorker(Learner, Generator):
         print(f"ColocatedWorker initialized on device: {self.learner_device}")
     
     def _sync_weights(self):
-        """
-        Synchronize weights from learner_model to gen_model.
-        
-        In the colocated setup, we maintain separate model instances but need to
-        keep them in sync. After each training update, we copy the learner's
-        weights to the generator so it uses the updated policy for rollouts.
-        
-        This manual sync approach lets us measure the weight synchronization overhead,
-        which becomes important when comparing to disaggregated setups.
-        """
-        # Copy state dict from learner to generator
         self.gen_model.load_state_dict(self.learner_model.state_dict())
     
-    def training_step(self, prompts: List[str]) -> Dict[str, Any]:
-        """
-        Perform one complete training step: generate rollouts + update policy.
-        
-        This is the main entry point called by the training loop.
-        It combines generation and learning in a synchronous manner.
-        
-        Args:
-            prompts: List of text prompts to train on
-            
-        Returns:
-            Dictionary with training statistics including timing info
-        """
+    def training_step(self, prompts: List[str], k = 1) -> Dict[str, Any]:
         # Phase 1: Generate rollouts (G responses per prompt)
         # Uses Generator.generate_trajectories() with self.gen_model
         rollout_start = time.time()
-        
-        trajectories = self.generate_trajectories(prompts)
+        trajectories_list = []
+        for i in range(k):
+            trajectories = self.generate_trajectories(prompts)
+            trajectories_list.append(trajectories)
         rollout_time = time.time() - rollout_start
         
         # Phase 2: Update policy using GRPO
         # Uses Learner.update_policy() with self.learner_model
         train_start = time.time()
-        loss = self.update_policy(trajectories)
+        for i in range(k):
+            trajectories = trajectories_list[i]
+            loss = self.update_policy(trajectories)
         train_time = time.time() - train_start
 
-        # before the weight sync, compute the KL divergence between the updated model weights and the pi_0, pi_i-1
-        
-        
         # Phase 3: Sync updated weights from learner_model to gen_model
         # This ensures the generator uses the updated policy for the next rollout
         sync_start = time.time()
         self._sync_weights()
         weight_sync_time = time.time() - sync_start
         
-        self.step_count += 1
+        self.step_count += k
         
         # Compute average reward across all responses
         all_rewards = torch.cat([traj.rewards for traj in trajectories])
@@ -581,8 +473,8 @@ TRAINING_PROMPTS = [
     "Write a sentence containing the word 'wisdom'.",
 ]
 
-
-def run_training(num_steps: int = 10, num_workers: int = 1):
+# k is how off-policy we should go
+def run_training(num_steps: int = 10, num_workers: int = 1, k = 1):
     """
     Run colocated GRPO training with text generation.
     
@@ -603,9 +495,13 @@ def run_training(num_steps: int = 10, num_workers: int = 1):
     # Each worker has its own model and can train independently
     workers = [ColocatedWorker.remote() for _ in range(num_workers)]
     print(f"Created {len(workers)} ColocatedWorker actors")
-    
+    adjusted_num_steps = num_steps // k
+    if num_steps % k != 0:
+        adjusted_num_steps += 1
     # Training loop
-    for step in range(num_steps):
+    for step in range(0, adjusted_num_steps):
+        if (step == adjusted_num_steps - 1) and (num_steps % k != 0):
+            k = num_steps % k
         step_start_time = time.time()
         
         # Distribute prompts across workers
@@ -625,7 +521,7 @@ def run_training(num_steps: int = 10, num_workers: int = 1):
                 worker_prompts = [TRAINING_PROMPTS[i % len(TRAINING_PROMPTS)]]
             
             # Submit training step asynchronously
-            futures.append(worker.training_step.remote(worker_prompts))
+            futures.append(worker.training_step.remote(worker_prompts, k))
         
         # Wait for all workers to complete and collect results
         results = ray.get(futures)
@@ -663,7 +559,10 @@ def run_training(num_steps: int = 10, num_workers: int = 1):
 
 def run_once(num_steps: int = 10, num_workers: int = 1):
     """Entry point for training."""
-    run_training(num_steps, num_workers)
+    start_time = time.time()
+    run_training(num_steps, num_workers, k=1)
+    end_time = time.time()
+    print(f"End to end training time: {end_time - start_time}")
 
 
 # ===================== Entry point =====================
