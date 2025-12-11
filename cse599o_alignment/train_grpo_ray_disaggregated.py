@@ -3,8 +3,6 @@ GRPO Skeleton: Disaggregated Asynchronous Training Loop
 --------------------------------------------------------
 Disaggregated training separates Generator and Learner into different actors.
 This allows for overlapping rollout generation with training for better throughput.
-
-This version reuses Generator and Learner base classes from the colocated implementation.
 """
 
 import argparse
@@ -32,8 +30,6 @@ from ray.experimental.collective import create_collective_group
 
 RDT = True 
 
-# ===================== Replay Buffer =====================
-
 @ray.remote
 class ReplayBuffer:
     """Stores scored trajectories for sampling by the Learner."""
@@ -57,7 +53,6 @@ class ReplayBuffer:
         return len(self.data)
 
 
-# ===================== Disaggregated Actors =====================
 
 @ray.remote(num_gpus=1)
 class DisaggregatedGenerator(Generator):
@@ -106,11 +101,6 @@ class DisaggregatedGenerator(Generator):
 class DisaggregatedLearner(Learner):
     """
     Ray actor wrapper around Learner base class.
-    
-    Adds:
-    - Sampling from ReplayBuffer
-    - Weight export via get_weights()
-    - Version tracking
     """
     def __init__(self, replay_buf):
         super().__init__()  # Initializes learner_model, optimizer from Learner
@@ -132,7 +122,6 @@ class DisaggregatedLearner(Learner):
             traj.rewards = traj.rewards.to(self.learner_device)
             traj.response_masks = traj.response_masks.to(self.learner_device)
         
-        # Use parent's update_policy()
         loss = self.update_policy(trajectories)
         self.version += 1
         
@@ -141,7 +130,8 @@ class DisaggregatedLearner(Learner):
     def get_weights(self) -> Dict[str, torch.Tensor]:
         """Export model weights to CPU for transfer to Generator."""
         return {k: v.cpu() for k, v in self.learner_model.state_dict().items()}
-    
+
+    # Need to label the sending method; 
     @ray.method(tensor_transport="nccl")
     def get_weights_nccl(self) -> Dict[str, torch.Tensor]:
         return self.learner_model.state_dict()
@@ -149,8 +139,6 @@ class DisaggregatedLearner(Learner):
     def get_version(self) -> int:
         return self.version
 
-
-# ===================== Training Loop =====================
 
 TRAINING_PROMPTS = [
     "Write a sentence containing the word 'happy'.",
@@ -182,16 +170,14 @@ def run_training(num_steps: int = 10):
         print(f"Using Ray Direct Transfer on nccl")
         group = create_collective_group([learner, generator], backend="nccl")
     
-    print("Created disaggregated actors (Generator, Learner, ReplayBuffer)")
-    
-    # Initial rollout (blocking) - need data to bootstrap
+    # Initial rollout (blocking) - need data for the first rollout
     print("Generating initial rollout...")
     ray.get(generator.generate.remote(TRAINING_PROMPTS))
     
     for step in range(num_steps):
         step_start = time.time()
         
-        # Phase 1: Launch next rollout ASYNC (staleness=1)
+        # Phase 1: Launch next rollout async (staleness=1)
         rollout_start = time.time()
         next_rollout_future = generator.generate.remote(TRAINING_PROMPTS)
         
@@ -237,8 +223,6 @@ def run_once(num_steps: int = 10):
     end_time = time.time()
     print(f"Disaggregated total time: {end_time - start_time}")
 
-
-# ===================== Entry point =====================
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
